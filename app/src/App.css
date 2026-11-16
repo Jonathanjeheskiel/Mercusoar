@@ -1,0 +1,146 @@
+/* ===== Mercusoar design tokens =====
+   Change colors here, never inside components. */
+:root {
+  --color-navy: #0b2545;      /* brand: night sea */
+  --color-amber: #ffc857;     /* brand: lighthouse light, main actions */
+  --color-teal: #13a89e;      /* brand: sea, success / online */
+  --color-bg: #071a33;        /* app background (darker navy) */
+  --color-card: #0f2d52;      /* raised surfaces */
+  --color-input: #0b2545;
+  --color-border: #2a4a73;
+  --color-text: #f7f9fb;
+  --color-text-muted: #a9bad0;
+  --color-error: #ff9a8a;
+
+  --radius: 10px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Segoe UI ships with Windows, so it works on offline lab PCs. */
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; }
+h1 { margin: 0; font-size: 1.5rem; }
+
+/* Visible keyboard focus everywhere */
+:focus-visible {
+  outline: 3px solid var(--color-amber);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+
+/* ===== Layout ===== */
+.setup {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+.card {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-8);
+}
+
+.setup-card {
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.brand-row { display: flex; align-items: center; gap: var(--space-3); }
+.brand-name { font-size: 1.75rem; letter-spacing: 0.5px; }
+.tagline { margin: 0; color: var(--color-text-muted); font-size: 0.95rem; }
+
+/* ===== Form fields ===== */
+.field { display: flex; flex-direction: column; gap: var(--space-2); border: 0; padding: 0; margin: 0; }
+.field > label, legend { font-weight: 600; padding: 0; margin-bottom: var(--space-2); }
+
+input[type="text"],
+input[type="number"] {
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  min-height: 44px;
+}
+input[aria-invalid="true"] { border-color: var(--color-error); }
+
+.help, .error { margin: 0; font-size: 0.875rem; }
+.help { color: var(--color-text-muted); }
+.error { color: var(--color-error); }
+.muted { color: var(--color-text-muted); }
+.hub-note { margin-top: calc(-1 * var(--space-4)); }
+
+/* Role and seat choices: big clickable cards around real radio buttons */
+.role-options, .seat-options { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+
+.role-option, .seat-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  min-height: 44px;
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+.seat-option { flex-direction: row; align-items: center; gap: var(--space-2); }
+.role-option:hover, .seat-option:hover { border-color: var(--color-teal); }
+.role-option.selected, .seat-option.selected {
+  border-color: var(--color-amber);
+  background: rgba(255, 200, 87, 0.08);
+}
+.role-option input { position: absolute; opacity: 0; pointer-events: none; }
+.role-option:has(input:focus-visible) { outline: 3px solid var(--color-amber); outline-offset: 2px; }
+.role-title { font-weight: 600; font-size: 1.05rem; }
+.role-desc { color: var(--color-text-muted); font-size: 0.875rem; }
+
+.check { flex-direction: row; align-items: center; gap: var(--space-2); }
+.check input { width: 20px; height: 20px; accent-color: var(--color-amber); }
+.check label { margin: 0; font-weight: 500; cursor: pointer; }
+.seat-option input { accent-color: var(--color-amber); }
+
+/* ===== Buttons ===== */
+.btn-primary, .btn-secondary {
+  font: inherit;
+  font-weight: 600;
+  min-height: 48px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: filter 150ms ease, background-color 150ms ease;
+}
+.btn-primary { background: var(--color-amber); color: var(--color-navy); border: 0; }
+.btn-primary:hover { filter: brightness(1.08); }
+.btn-secondary { background: transparent; color: var(--color-text); border: 1px solid var(--color-border); }
+.btn-secondary:hover { border-color: var(--color-teal); }
+
+.config-preview {
+  background: var(--color-input);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  margin: 0;
+  font-size: 0.875rem;
+  overflow-x: auto;
+}
