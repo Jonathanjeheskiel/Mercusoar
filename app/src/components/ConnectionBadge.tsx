@@ -4,7 +4,7 @@ const LABELS: Record<ConnectionStatus, string> = {
   connecting: "Connecting…",
   connected: "Connected",
   disconnected: "Hub unreachable, retrying…",
-  rejected: "Wrong passcode",
+  rejected: "Refused by the hub",
 };
 
 /** Small pill showing whether this window is connected to the hub. */

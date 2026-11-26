@@ -47,7 +47,7 @@ export default function AssistantScreen({ seat, hostHub, hubAddress, passcode, o
     }
   }
 
-  const { status, send } = useHub(
+  const { status, send, rejectReason } = useHub(
     address,
     code ? { type: "hello_assistant", name: seat, passcode: code } : null,
     onMessage,
@@ -85,7 +85,8 @@ export default function AssistantScreen({ seat, hostHub, hubAddress, passcode, o
       )}
       {status === "rejected" && (
         <p className="banner banner-error" role="alert">
-          The hub rejected the passcode. Exit and type the passcode shown on the front assistant's screen.
+          The hub refused this window: {rejectReason || "wrong passcode"}. Exit and type the passcode shown on
+          the front assistant's screen.
         </p>
       )}
 

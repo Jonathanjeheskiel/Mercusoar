@@ -18,6 +18,8 @@ export function useHub(
   onMessage: (msg: HubMessage) => void,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  /** Why the hub refused this window, e.g. "Wrong passcode". */
+  const [rejectReason, setRejectReason] = useState("");
   const socketRef = useRef<WebSocket | null>(null);
 
   // Keep the latest callback without reconnecting when it changes.
@@ -48,8 +50,9 @@ export function useHub(
           return; // ignore anything that is not valid JSON
         }
         if (msg.type === "auth_error") {
-          stopped = true; // retrying with the same wrong passcode is pointless
+          stopped = true; // retrying with the same hello is pointless
           setStatus("rejected");
+          setRejectReason(msg.message);
         }
         onMessageRef.current(msg);
       };
@@ -73,5 +76,5 @@ export function useHub(
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   }
 
-  return { status, send };
+  return { status, send, rejectReason };
 }

@@ -18,7 +18,7 @@ export default function StudentScreen({ pc, hubAddress, onExit }: Props) {
     if (msg.type === "resolved") setJustResolved(true);
   }
 
-  const { status, send } = useHub(hubAddress, { type: "hello_student", pc }, onMessage);
+  const { status, send, rejectReason } = useHub(hubAddress, { type: "hello_student", pc }, onMessage);
   const connected = status === "connected";
 
   function sendFlare(e: React.FormEvent) {
@@ -40,6 +40,12 @@ export default function StudentScreen({ pc, hubAddress, onExit }: Props) {
           <button className="btn-link" onClick={onExit}>Exit</button>
         </span>
       </header>
+
+      {status === "rejected" && (
+        <p className="banner banner-error" role="alert">
+          {rejectReason || "The hub refused this PC."} Press Exit to start again, or tell the lab assistant.
+        </p>
+      )}
 
       <section className="student-center">
         <div className="card student-card" aria-live="polite">
@@ -75,7 +81,7 @@ export default function StudentScreen({ pc, hubAddress, onExit }: Props) {
               <button type="submit" className="btn-flare" disabled={!connected}>
                 Send a Flare
               </button>
-              {!connected && <p className="help">Waiting for the hub connection…</p>}
+              {!connected && status !== "rejected" && <p className="help">Waiting for the hub connection…</p>}
             </form>
           )}
         </div>
