@@ -39,7 +39,7 @@ h1 { margin: 0; font-size: 1.5rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; }
+  * { transition: none !important; animation: none !important; }
 }
 
 /* ===== Layout ===== */
@@ -136,14 +136,6 @@ input[aria-invalid="true"] { border-color: var(--color-error); }
 .btn-secondary { background: transparent; color: var(--color-text); border: 1px solid var(--color-border); }
 .btn-secondary:hover { border-color: var(--color-teal); }
 
-.config-preview {
-  background: var(--color-input);
-  border-radius: var(--radius);
-  padding: var(--space-4);
-  margin: 0;
-  font-size: 0.875rem;
-  overflow-x: auto;
-}
 
 /* Shown only on developer laptops without a lab config file */
 .dev-note {
