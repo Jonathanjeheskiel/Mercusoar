@@ -91,6 +91,17 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Compare passcodes the way people type them: ignore case, spaces and the dash,
+/// so "k7q4mz" and "K7Q-4MZ" both match.
+fn normalize_passcode(text: &str) -> String {
+    text.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
+}
+
+/// The two admin seats. Anything else in `hello_assistant` is rejected.
+fn is_valid_seat(name: &str) -> bool {
+    matches!(name, "Front" | "Back")
+}
+
 /// Make a short random passcode like "K7Q-4MZ".
 /// Uses letters and digits that are hard to confuse (no 0/O, 1/I/L).
 /// Randomness comes from Rust's hasher seed, which the OS randomizes per run.
@@ -133,7 +144,7 @@ impl Hub {
                 if !matches!(c.role, Role::Unknown) {
                     return true;
                 }
-                if passcode.trim().to_uppercase() != self.passcode {
+                if !is_valid_seat(&name) || normalize_passcode(&passcode) != normalize_passcode(&self.passcode) {
                     let _ = c.tx.send(Message::text(
                         json!({ "type": "auth_error", "message": "Wrong passcode" }).to_string(),
                     ));
@@ -381,6 +392,23 @@ mod tests {
         assert!(hub.handle(cid, assistant_hello(" k7q-4mz ")));
         assert_eq!(hub.assistant_name(cid).as_deref(), Some("Front"));
         assert_eq!(inbox(&mut rx)[0]["type"], "auth_ok");
+    }
+
+    #[test]
+    fn passcode_without_dash_works() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (cid, _rx) = connect(&mut hub);
+        assert!(hub.handle(cid, assistant_hello("k7q4mz")));
+        assert_eq!(hub.assistant_name(cid).as_deref(), Some("Front"));
+    }
+
+    #[test]
+    fn unknown_seat_name_is_rejected() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (cid, _rx) = connect(&mut hub);
+        let hello = ClientMsg::HelloAssistant { name: "x".repeat(10_000), passcode: "K7Q-4MZ".into() };
+        assert!(!hub.handle(cid, hello));
+        assert!(hub.assistant_name(cid).is_none());
     }
 
     #[test]
