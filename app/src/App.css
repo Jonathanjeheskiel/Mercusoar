@@ -144,3 +144,24 @@ input[aria-invalid="true"] { border-color: var(--color-error); }
   font-size: 0.875rem;
   overflow-x: auto;
 }
+
+/* Shown only on developer laptops without a lab config file */
+.dev-note {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--color-teal);
+  border-radius: var(--radius);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+/* Lab PCs with a config file: the role is shown, not chosen */
+.fixed-seat {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-input);
+  border-radius: var(--radius);
+  font-weight: 600;
+}
+
+input::placeholder { color: var(--color-text-muted); opacity: 0.6; }

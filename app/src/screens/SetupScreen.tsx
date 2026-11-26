@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import Logo from "../components/Logo";
-import { FIRST_STUDENT_PC, LAST_STUDENT_PC, Seat, SetupConfig } from "../types";
+import { FIRST_STUDENT_PC, LabConfig, LAST_STUDENT_PC, Seat, SetupConfig } from "../types";
 
 type Role = SetupConfig["role"];
 
-type Errors = { pc?: string; hub?: string };
+type Errors = { pc?: string; hub?: string; passcode?: string };
 
 // Accepts "localhost" or an IPv4 address like 192.168.1.10
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
@@ -12,23 +13,46 @@ function isValidAddress(text: string) {
   return text === "localhost" || IPV4.test(text);
 }
 
+// Passcodes look like K7Q-4MZ (the dash is optional when typing)
+const PASSCODE = /^[A-Z0-9]{3}-?[A-Z0-9]{3}$/i;
+
 export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig) => void }) {
+  // Lab config: undefined = still loading, null = none found (developer laptop).
+  const [lab, setLab] = useState<LabConfig | null | undefined>(undefined);
+  const [labError, setLabError] = useState("");
+
   // Form state: one useState per field.
   const [role, setRole] = useState<Role>("student");
   const [pc, setPc] = useState("2");
   const [seat, setSeat] = useState<Seat>("Front");
   const [hostHub, setHostHub] = useState(true);
   const [hubAddress, setHubAddress] = useState("127.0.0.1");
+  const [passcode, setPasscode] = useState("");
   const [errors, setErrors] = useState<Errors>({});
 
-  // The front assistant normally hosts the hub, the back one connects to it.
+  // On startup, ask Rust for the lab config file. If it exists, it decides the role.
+  useEffect(() => {
+    invoke<LabConfig | null>("load_config")
+      .then((config) => {
+        setLab(config);
+        if (!config) return;
+        setRole(config.role);
+        if (config.seat) chooseSeat(config.seat);
+        if (config.hub_address) setHubAddress(config.hub_address);
+      })
+      .catch((e) => setLabError(String(e)));
+  }, []);
+
+  // The front assistant hosts the hub, the back one connects to it.
   function chooseSeat(next: Seat) {
     setSeat(next);
     setHostHub(next === "Front");
   }
 
-  // Students always need the hub address. Assistants only if they don't host it.
+  const locked = !!lab; // role and seat come from the lab config
   const needsAddress = role === "student" || !hostHub;
+  const addressFromConfig = !!lab?.hub_address;
+  const needsPasscode = role === "assistant" && !hostHub;
 
   function handleStart(e: React.FormEvent) {
     e.preventDefault();
@@ -41,7 +65,10 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
       if (!ok) found.pc = `Enter a student PC number from ${FIRST_STUDENT_PC} to ${LAST_STUDENT_PC}.`;
     }
     if (needsAddress && !isValidAddress(address)) {
-      found.hub = "Enter an address like 192.168.1.10 (ask the assistant at PC 1).";
+      found.hub = "Enter an address like 192.168.1.10 (shown on the front assistant's screen).";
+    }
+    if (needsPasscode && !PASSCODE.test(passcode.trim())) {
+      found.passcode = "Enter the 6-character passcode shown on the front assistant's screen, e.g. K7Q-4MZ.";
     }
 
     setErrors(found);
@@ -50,9 +77,31 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
     onStart(
       role === "student"
         ? { role, pc: pcNumber, hubAddress: address }
-        : { role, seat, hostHub, hubAddress: hostHub ? "127.0.0.1" : address },
+        : {
+            role,
+            seat,
+            hostHub,
+            hubAddress: hostHub ? "127.0.0.1" : address,
+            passcode: needsPasscode ? passcode.trim().toUpperCase() : "",
+          },
     );
   }
+
+  // A broken config file on a lab PC must not fall back to the role picker,
+  // or students would see the assistant option. Show the problem instead.
+  if (labError) {
+    return (
+      <main className="setup">
+        <div className="card setup-card" role="alert">
+          <h1>Mercusoar is not set up correctly</h1>
+          <p className="error">{labError}</p>
+          <p className="help">Please tell the lab assistant.</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (lab === undefined) return null; // loading, takes a moment
 
   return (
     <main className="setup">
@@ -65,37 +114,45 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
           </div>
         </div>
 
-        <fieldset className="field">
-          <legend>Who is using this PC?</legend>
-          <div className="role-options">
-            <label className={`role-option ${role === "student" ? "selected" : ""}`}>
-              <input
-                type="radio"
-                name="role"
-                value="student"
-                checked={role === "student"}
-                onChange={() => setRole("student")}
-              />
-              <span className="role-title">Student</span>
-              <span className="role-desc">Ask for help quietly</span>
-            </label>
-            <label className={`role-option ${role === "assistant" ? "selected" : ""}`}>
-              <input
-                type="radio"
-                name="role"
-                value="assistant"
-                checked={role === "assistant"}
-                onChange={() => setRole("assistant")}
-              />
-              <span className="role-title">Lab assistant</span>
-              <span className="role-desc">See and answer Flares</span>
-            </label>
-          </div>
-        </fieldset>
+        {!locked && (
+          <p className="dev-note">
+            Developer mode: no lab config found, so any role can be picked. On lab PCs the role is fixed.
+          </p>
+        )}
+
+        {!locked && (
+          <fieldset className="field">
+            <legend>Who is using this PC?</legend>
+            <div className="role-options">
+              <label className={`role-option ${role === "student" ? "selected" : ""}`}>
+                <input
+                  type="radio"
+                  name="role"
+                  value="student"
+                  checked={role === "student"}
+                  onChange={() => setRole("student")}
+                />
+                <span className="role-title">Student</span>
+                <span className="role-desc">Ask for help quietly</span>
+              </label>
+              <label className={`role-option ${role === "assistant" ? "selected" : ""}`}>
+                <input
+                  type="radio"
+                  name="role"
+                  value="assistant"
+                  checked={role === "assistant"}
+                  onChange={() => setRole("assistant")}
+                />
+                <span className="role-title">Lab assistant</span>
+                <span className="role-desc">See and answer Flares</span>
+              </label>
+            </div>
+          </fieldset>
+        )}
 
         {role === "student" && (
           <div className="field">
-            <label htmlFor="pc">PC number</label>
+            <label htmlFor="pc">Your PC number</label>
             <input
               id="pc"
               type="number"
@@ -117,7 +174,14 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
           </div>
         )}
 
-        {role === "assistant" && (
+        {role === "assistant" && locked && (
+          <p className="fixed-seat">
+            Lab assistant · {seat} seat (PC {seat === "Front" ? 1 : 40})
+            {hostHub && " · hosts the hub"}
+          </p>
+        )}
+
+        {role === "assistant" && !locked && (
           <>
             <fieldset className="field">
               <legend>Your seat</legend>
@@ -152,7 +216,7 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
           </>
         )}
 
-        {needsAddress && (
+        {needsAddress && !addressFromConfig && (
           <div className="field">
             <label htmlFor="hub">Hub address</label>
             <input
@@ -169,6 +233,30 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
             ) : (
               <p id="hub-help" className="help">
                 Shown on the front assistant's screen. Use 127.0.0.1 when testing on one PC.
+              </p>
+            )}
+          </div>
+        )}
+
+        {needsPasscode && (
+          <div className="field">
+            <label htmlFor="passcode">Assistant passcode</label>
+            <input
+              id="passcode"
+              type="text"
+              value={passcode}
+              onChange={(e) => setPasscode(e.target.value)}
+              aria-invalid={!!errors.passcode}
+              aria-describedby="passcode-help"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="K7Q-4MZ"
+            />
+            {errors.passcode ? (
+              <p id="passcode-help" className="error">{errors.passcode}</p>
+            ) : (
+              <p id="passcode-help" className="help">
+                Shown only on the front assistant's screen. It changes every session.
               </p>
             )}
           </div>
