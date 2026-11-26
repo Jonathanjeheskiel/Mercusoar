@@ -15,8 +15,9 @@
 //! can send, and `broadcast()` for what the hub sends back.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,13 @@ pub const PORT: u16 = 47800;
 
 /// Longest question a student can type (characters).
 const MAX_QUESTION_LEN: usize = 200;
+
+/// Wrong passcodes allowed from one computer before it is locked out.
+/// The 1 s delay per wrong guess alone does not stop guessing, because a
+/// script can open many connections at once.
+const MAX_FAILED_AUTH: u32 = 5;
+/// How long a computer stays locked out after too many wrong passcodes.
+const AUTH_LOCKOUT: Duration = Duration::from_secs(10 * 60);
 
 /// One help request from one student PC.
 #[derive(Clone, Serialize)]
@@ -67,6 +75,8 @@ enum Role {
 
 struct Client {
     role: Role,
+    /// Address of the computer this window runs on.
+    ip: IpAddr,
     /// Messages pushed here are written to this client's WebSocket.
     tx: mpsc::UnboundedSender<Message>,
 }
@@ -78,6 +88,8 @@ struct Hub {
     next_client_id: u64,
     next_flare_id: u64,
     clients: HashMap<u64, Client>,
+    /// Wrong passcode attempts per computer: (count, time of the first one).
+    failed_auth: HashMap<IpAddr, (u32, Instant)>,
     /// Open Flares, oldest first. This order IS the fair queue.
     flares: Vec<Flare>,
 }
@@ -104,27 +116,40 @@ fn is_valid_seat(name: &str) -> bool {
 
 /// Make a short random passcode like "K7Q-4MZ".
 /// Uses letters and digits that are hard to confuse (no 0/O, 1/I/L).
-/// Randomness comes from Rust's hasher seed, which the OS randomizes per run.
-fn new_passcode() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+/// Randomness comes from the operating system's secure random generator.
+fn new_passcode() -> Result<String, String> {
     const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    // Bytes at or above this limit are skipped, so every letter is equally likely.
+    let limit = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
     let mut out = String::new();
-    for i in 0..6u64 {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(i ^ now_ms());
-        let idx = (h.finish() % ALPHABET.len() as u64) as usize;
-        if i == 3 {
-            out.push('-');
+    let mut picked = 0;
+    while picked < 6 {
+        let mut buf = [0u8; 16];
+        getrandom::fill(&mut buf).map_err(|e| format!("no secure randomness: {e}"))?;
+        for b in buf.into_iter().filter(|&b| b < limit) {
+            if picked == 6 {
+                break;
+            }
+            if picked == 3 {
+                out.push('-');
+            }
+            out.push(ALPHABET[b as usize % ALPHABET.len()] as char);
+            picked += 1;
         }
-        out.push(ALPHABET[idx] as char);
     }
-    out
+    Ok(out)
 }
 
 impl Hub {
     fn new(passcode: String) -> Self {
-        Hub { passcode, next_client_id: 0, next_flare_id: 0, clients: HashMap::new(), flares: Vec::new() }
+        Hub {
+            passcode,
+            next_client_id: 0,
+            next_flare_id: 0,
+            clients: HashMap::new(),
+            failed_auth: HashMap::new(),
+            flares: Vec::new(),
+        }
     }
 
     /// Apply one message from client `cid` to the hub state.
@@ -140,16 +165,22 @@ impl Hub {
                 }
             }
             ClientMsg::HelloAssistant { name, passcode } => {
-                let Some(c) = self.clients.get_mut(&cid) else { return false };
+                let Some(c) = self.clients.get(&cid) else { return false };
                 if !matches!(c.role, Role::Unknown) {
                     return true;
                 }
-                if !is_valid_seat(&name) || normalize_passcode(&passcode) != normalize_passcode(&self.passcode) {
-                    let _ = c.tx.send(Message::text(
-                        json!({ "type": "auth_error", "message": "Wrong passcode" }).to_string(),
-                    ));
+                let ip = c.ip;
+                if self.is_locked_out(ip) {
+                    self.reject(cid, "Too many wrong passcodes from this PC. Try again in 10 minutes.");
                     return false;
                 }
+                if !is_valid_seat(&name) || normalize_passcode(&passcode) != normalize_passcode(&self.passcode) {
+                    self.record_failed_auth(ip);
+                    self.reject(cid, "Wrong passcode");
+                    return false;
+                }
+                self.failed_auth.remove(&ip);
+                let Some(c) = self.clients.get_mut(&cid) else { return false };
                 c.role = Role::Assistant(name);
                 let _ = c.tx.send(Message::text(json!({ "type": "auth_ok" }).to_string()));
             }
@@ -206,6 +237,28 @@ impl Hub {
             }
         }
         true
+    }
+
+    /// Tell a client why it is being disconnected.
+    fn reject(&self, cid: u64, message: &str) {
+        if let Some(c) = self.clients.get(&cid) {
+            let _ = c.tx.send(Message::text(json!({ "type": "auth_error", "message": message }).to_string()));
+        }
+    }
+
+    fn is_locked_out(&mut self, ip: IpAddr) -> bool {
+        match self.failed_auth.get(&ip) {
+            Some(&(_, first)) if first.elapsed() >= AUTH_LOCKOUT => {
+                self.failed_auth.remove(&ip);
+                false
+            }
+            Some(&(count, _)) => count >= MAX_FAILED_AUTH,
+            None => false,
+        }
+    }
+
+    fn record_failed_auth(&mut self, ip: IpAddr) {
+        self.failed_auth.entry(ip).or_insert((0, Instant::now())).0 += 1;
     }
 
     fn student_pc(&self, cid: u64) -> Option<u32> {
@@ -279,12 +332,12 @@ pub async fn start() -> Result<String, String> {
         .await
         .map_err(|e| format!("could not open port {PORT}: {e}"))?;
 
-    let passcode = new_passcode();
+    let passcode = new_passcode()?;
     let hub: SharedHub = Arc::new(Mutex::new(Hub::new(passcode.clone())));
     tauri::async_runtime::spawn(async move {
         loop {
-            if let Ok((stream, _addr)) = listener.accept().await {
-                tauri::async_runtime::spawn(handle_connection(stream, hub.clone()));
+            if let Ok((stream, addr)) = listener.accept().await {
+                tauri::async_runtime::spawn(handle_connection(stream, addr, hub.clone()));
             }
         }
     });
@@ -292,7 +345,7 @@ pub async fn start() -> Result<String, String> {
 }
 
 /// Serve one connected window until it disconnects.
-async fn handle_connection(stream: TcpStream, hub: SharedHub) {
+async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub) {
     let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
     let (mut ws_out, mut ws_in) = ws.split();
 
@@ -302,7 +355,7 @@ async fn handle_connection(stream: TcpStream, hub: SharedHub) {
         let mut h = hub.lock().await;
         h.next_client_id += 1;
         let cid = h.next_client_id;
-        h.clients.insert(cid, Client { role: Role::Unknown, tx });
+        h.clients.insert(cid, Client { role: Role::Unknown, ip: addr.ip(), tx });
         cid
     };
 
@@ -349,10 +402,15 @@ mod tests {
 
     /// Add a fake connected window and return its id plus its inbox.
     fn connect(hub: &mut Hub) -> (u64, mpsc::UnboundedReceiver<Message>) {
+        connect_from(hub, "127.0.0.1")
+    }
+
+    /// Same as `connect`, from a given computer address.
+    fn connect_from(hub: &mut Hub, ip: &str) -> (u64, mpsc::UnboundedReceiver<Message>) {
         let (tx, rx) = mpsc::unbounded_channel();
         hub.next_client_id += 1;
         let cid = hub.next_client_id;
-        hub.clients.insert(cid, Client { role: Role::Unknown, tx });
+        hub.clients.insert(cid, Client { role: Role::Unknown, ip: ip.parse().unwrap(), tx });
         (cid, rx)
     }
 
@@ -371,9 +429,27 @@ mod tests {
 
     #[test]
     fn passcode_looks_like_abc_def() {
-        let p = new_passcode();
+        let p = new_passcode().unwrap();
         assert_eq!(p.len(), 7);
         assert_eq!(&p[3..4], "-");
+        assert_ne!(p, new_passcode().unwrap());
+    }
+
+    #[test]
+    fn guessing_passcodes_locks_the_pc_out() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        for _ in 0..MAX_FAILED_AUTH {
+            let (cid, _rx) = connect_from(&mut hub, "192.168.1.20");
+            assert!(!hub.handle(cid, assistant_hello("AAA-AAA")));
+        }
+        // Even the right passcode is refused from that PC now...
+        let (cid, mut rx) = connect_from(&mut hub, "192.168.1.20");
+        assert!(!hub.handle(cid, assistant_hello("K7Q-4MZ")));
+        assert!(hub.assistant_name(cid).is_none());
+        assert!(inbox(&mut rx)[0]["message"].as_str().unwrap().contains("Too many"));
+        // ...but the real assistant on another PC can still log in.
+        let (back, _rx) = connect_from(&mut hub, "192.168.1.40");
+        assert!(hub.handle(back, assistant_hello("K7Q-4MZ")));
     }
 
     #[test]
