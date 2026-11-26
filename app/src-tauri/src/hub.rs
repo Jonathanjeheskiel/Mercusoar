@@ -23,9 +23,10 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 /// TCP port the hub listens on. Every PC must use the same port.
@@ -33,6 +34,21 @@ pub const PORT: u16 = 47800;
 
 /// Longest question a student can type (characters).
 const MAX_QUESTION_LEN: usize = 200;
+
+// ----- Limits, so one misbehaving computer cannot take the hub down -----
+/// Largest message a client may send. Real messages are well under 1 KB.
+const MAX_MESSAGE_BYTES: usize = 4 * 1024;
+/// Open connections the hub accepts in total, and from one computer.
+/// The hub PC itself (127.0.0.1) has no per-computer limit, for the demo script.
+const MAX_CONNECTIONS: usize = 200;
+const MAX_CONNECTIONS_PER_IP: usize = 4;
+/// Time a new connection gets to finish the WebSocket handshake and say hello.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Messages per second one window may send before it is disconnected.
+const MAX_MESSAGES_PER_SEC: u32 = 20;
+/// Messages waiting to be written to one window. A window that falls this far
+/// behind (stopped reading) is disconnected and reconnects with fresh state.
+const OUTBOX_SIZE: usize = 64;
 
 /// Student PCs are 2-39. PC 1 (front) and PC 40 (back) are admin PCs.
 /// Must match FIRST_STUDENT_PC / LAST_STUDENT_PC in src/types.ts.
@@ -87,7 +103,16 @@ struct Client {
     /// Address of the computer this window runs on.
     ip: IpAddr,
     /// Messages pushed here are written to this client's WebSocket.
-    tx: mpsc::UnboundedSender<Message>,
+    tx: mpsc::Sender<Message>,
+    /// Dropped together with the client, which tells its connection to close.
+    _kick: oneshot::Sender<()>,
+}
+
+impl Client {
+    /// Queue a message for this window. False if its outbox is full or closed.
+    fn push(&self, text: String) -> bool {
+        self.tx.try_send(Message::text(text)).is_ok()
+    }
 }
 
 struct Hub {
@@ -201,7 +226,7 @@ impl Hub {
                 self.failed_auth.remove(&ip);
                 let Some(c) = self.clients.get_mut(&cid) else { return false };
                 c.role = Role::Assistant(name);
-                let _ = c.tx.send(Message::text(json!({ "type": "auth_ok" }).to_string()));
+                c.push(json!({ "type": "auth_ok" }).to_string());
             }
             ClientMsg::Flare { question } => {
                 let Some(pc) = self.student_pc(cid) else { return true };
@@ -263,7 +288,7 @@ impl Hub {
     /// Tell a client why it is being disconnected.
     fn reject(&self, cid: u64, message: &str) {
         if let Some(c) = self.clients.get(&cid) {
-            let _ = c.tx.send(Message::text(json!({ "type": "auth_error", "message": message }).to_string()));
+            c.push(json!({ "type": "auth_error", "message": message }).to_string());
         }
     }
 
@@ -328,13 +353,14 @@ impl Hub {
         let text = value.to_string();
         for c in self.clients.values() {
             if matches!(c.role, Role::Student(p) if p == pc) {
-                let _ = c.tx.send(Message::text(text.clone()));
+                c.push(text.clone());
             }
         }
     }
 
     /// Send every client its own view of the current state.
-    fn broadcast(&self) {
+    /// Windows that stopped reading are disconnected.
+    fn broadcast(&mut self) {
         let now = now_ms();
         let online: Vec<u32> = self
             .clients
@@ -350,11 +376,10 @@ impl Hub {
             json!({ "type": "state", "now_ms": now, "flares": self.flares, "online": online })
                 .to_string();
 
-        for c in self.clients.values() {
-            match &c.role {
-                Role::Assistant(_) => {
-                    let _ = c.tx.send(Message::text(assistant_view.clone()));
-                }
+        let mut stuck = Vec::new();
+        for (&cid, c) in &self.clients {
+            let sent = match &c.role {
+                Role::Assistant(_) => c.push(assistant_view.clone()),
                 Role::Student(pc) => {
                     // Students only see their OWN Flare and their place in line.
                     let mine = self.flares.iter().position(|f| f.pc == *pc).map(|i| {
@@ -366,10 +391,16 @@ impl Hub {
                         })
                     });
                     let view = json!({ "type": "my_flare", "flare": mine });
-                    let _ = c.tx.send(Message::text(view.to_string()));
+                    c.push(view.to_string())
                 }
-                Role::Unknown => {}
+                Role::Unknown => true,
+            };
+            if !sent {
+                stuck.push(cid);
             }
+        }
+        for cid in stuck {
+            self.clients.remove(&cid);
         }
     }
 }
@@ -383,14 +414,61 @@ pub async fn start() -> Result<String, String> {
 
     let passcode = new_passcode()?;
     let hub: SharedHub = Arc::new(Mutex::new(Hub::new(passcode.clone())));
+    let limits = Arc::new(ConnLimits::default());
     tauri::async_runtime::spawn(async move {
         loop {
-            if let Ok((stream, addr)) = listener.accept().await {
-                tauri::async_runtime::spawn(handle_connection(stream, addr, hub.clone()));
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    // Over the limit: drop the connection right away.
+                    let Some(slot) = limits.try_take(addr.ip()) else { continue };
+                    tauri::async_runtime::spawn(handle_connection(stream, addr, hub.clone(), slot));
+                }
+                // e.g. out of sockets: back off instead of spinning at 100% CPU.
+                Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
             }
         }
     });
     Ok(passcode)
+}
+
+/// Counts open connections, in total and per computer.
+#[derive(Default)]
+struct ConnLimits {
+    open: std::sync::Mutex<(usize, HashMap<IpAddr, usize>)>,
+}
+
+/// One open connection. Frees its place when dropped.
+struct ConnSlot {
+    limits: Arc<ConnLimits>,
+    ip: IpAddr,
+}
+
+impl ConnLimits {
+    fn try_take(self: &Arc<Self>, ip: IpAddr) -> Option<ConnSlot> {
+        let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        let (total, per_ip) = &mut *open;
+        let mine = per_ip.get(&ip).copied().unwrap_or(0);
+        if *total >= MAX_CONNECTIONS || (!ip.is_loopback() && mine >= MAX_CONNECTIONS_PER_IP) {
+            return None;
+        }
+        *total += 1;
+        per_ip.insert(ip, mine + 1);
+        Some(ConnSlot { limits: self.clone(), ip })
+    }
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        let mut open = self.limits.open.lock().unwrap_or_else(|e| e.into_inner());
+        let (total, per_ip) = &mut *open;
+        *total -= 1;
+        if let Some(n) = per_ip.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                per_ip.remove(&self.ip);
+            }
+        }
+    }
 }
 
 /// Browsers attach an Origin header to WebSocket connections. Without this
@@ -410,7 +488,8 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 }
 
 /// Serve one connected window until it disconnects.
-async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub) {
+/// `_slot` keeps this connection counted until the function returns.
+async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub, _slot: ConnSlot) {
     let check_origin = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
         let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
         if origin_allowed(origin) {
@@ -421,21 +500,26 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub) 
             Err(deny)
         }
     };
-    let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, check_origin).await else { return };
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_MESSAGE_BYTES));
+    let handshake = tokio_tungstenite::accept_hdr_async_with_config(stream, check_origin, Some(config));
+    let Ok(Ok(ws)) = tokio::time::timeout(HELLO_TIMEOUT, handshake).await else { return };
     let (mut ws_out, mut ws_in) = ws.split();
 
     // Register the client with a channel we can push messages into.
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let (tx, mut rx) = mpsc::channel::<Message>(OUTBOX_SIZE);
+    let (kick, mut kicked) = oneshot::channel::<()>();
     let cid = {
         let mut h = hub.lock().await;
         h.next_client_id += 1;
         let cid = h.next_client_id;
-        h.clients.insert(cid, Client { role: Role::Unknown, ip: addr.ip(), tx });
+        h.clients.insert(cid, Client { role: Role::Unknown, ip: addr.ip(), tx, _kick: kick });
         cid
     };
 
     // Writer task: forward queued messages to the socket.
-    let writer = tauri::async_runtime::spawn(async move {
+    let mut writer = tauri::async_runtime::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if ws_out.send(msg).await.is_err() {
                 break;
@@ -443,18 +527,42 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub) 
         }
     });
 
+    // A window must say who it is soon after connecting.
+    let hello_deadline = tokio::time::sleep(HELLO_TIMEOUT);
+    tokio::pin!(hello_deadline);
+    let mut identified = false;
+    let mut window_start = Instant::now();
+    let mut in_window = 0u32;
+
     // Reader loop: apply each incoming message, then update everyone.
-    while let Some(Ok(msg)) = ws_in.next().await {
+    loop {
+        let msg = tokio::select! {
+            msg = ws_in.next() => msg,
+            _ = &mut hello_deadline, if !identified => break,
+            _ = &mut kicked => break, // removed by the hub (stopped reading)
+        };
+        let Some(Ok(msg)) = msg else { break };
+
+        if window_start.elapsed() >= Duration::from_secs(1) {
+            window_start = Instant::now();
+            in_window = 0;
+        }
+        in_window += 1;
+        if in_window > MAX_MESSAGES_PER_SEC {
+            break; // flooding; the app reconnects on its own if this was a glitch
+        }
+
         let Message::Text(text) = msg else { continue };
         let Ok(parsed) = serde_json::from_str::<ClientMsg>(&text) else { continue };
         let mut h = hub.lock().await;
         let keep_open = h.handle(cid, parsed);
+        identified = h.clients.get(&cid).is_some_and(|c| !matches!(c.role, Role::Unknown));
         h.broadcast();
         drop(h);
         if !keep_open {
-            // Wrong passcode: wait a moment before closing, so guessing
-            // passcodes one by one would take far too long.
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            // Rejected (e.g. wrong passcode): wait a moment before closing, so
+            // guessing passcodes one by one would take far too long.
+            tokio::time::sleep(Duration::from_secs(1)).await;
             break;
         }
     }
@@ -465,7 +573,11 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub) 
     h.clients.remove(&cid); // drops this client's sender, so the writer finishes
     h.broadcast();
     drop(h);
-    let _ = writer.await; // let queued messages (e.g. "Wrong passcode") go out first
+    // Let queued messages (e.g. "Wrong passcode") go out first, but do not
+    // wait forever on a window that stopped reading.
+    if tokio::time::timeout(Duration::from_secs(2), &mut writer).await.is_err() {
+        writer.abort();
+    }
 }
 
 // ===== Tests =====
@@ -476,21 +588,22 @@ mod tests {
     use super::*;
 
     /// Add a fake connected window and return its id plus its inbox.
-    fn connect(hub: &mut Hub) -> (u64, mpsc::UnboundedReceiver<Message>) {
+    fn connect(hub: &mut Hub) -> (u64, mpsc::Receiver<Message>) {
         connect_from(hub, "127.0.0.1")
     }
 
     /// Same as `connect`, from a given computer address.
-    fn connect_from(hub: &mut Hub, ip: &str) -> (u64, mpsc::UnboundedReceiver<Message>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    fn connect_from(hub: &mut Hub, ip: &str) -> (u64, mpsc::Receiver<Message>) {
+        let (tx, rx) = mpsc::channel(OUTBOX_SIZE);
+        let (kick, _) = oneshot::channel();
         hub.next_client_id += 1;
         let cid = hub.next_client_id;
-        hub.clients.insert(cid, Client { role: Role::Unknown, ip: ip.parse().unwrap(), tx });
+        hub.clients.insert(cid, Client { role: Role::Unknown, ip: ip.parse().unwrap(), tx, _kick: kick });
         (cid, rx)
     }
 
     /// Everything a window has received so far, as JSON values.
-    fn inbox(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<serde_json::Value> {
+    fn inbox(rx: &mut mpsc::Receiver<Message>) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         while let Ok(Message::Text(t)) = rx.try_recv() {
             out.push(serde_json::from_str(&t).unwrap());
@@ -553,6 +666,36 @@ mod tests {
         assert!(!origin_allowed(Some("https://evil.example")));
         assert!(!origin_allowed(Some("http://tauri.localhost.evil.example")));
         assert!(!origin_allowed(Some("null")));
+    }
+
+    #[test]
+    fn a_window_that_stops_reading_is_disconnected() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (slow, _never_read) = connect(&mut hub);
+        let (ok, mut ok_rx) = connect(&mut hub);
+        hub.handle(slow, ClientMsg::HelloStudent { pc: 3 });
+        hub.handle(ok, ClientMsg::HelloStudent { pc: 4 });
+        for _ in 0..=OUTBOX_SIZE {
+            hub.broadcast();
+            inbox(&mut ok_rx);
+        }
+        assert!(!hub.clients.contains_key(&slow));
+        assert!(hub.clients.contains_key(&ok));
+    }
+
+    #[test]
+    fn connection_limits_per_computer_and_total() {
+        let limits = Arc::new(ConnLimits::default());
+        let ip: IpAddr = "192.168.1.20".parse().unwrap();
+        let slots: Vec<_> = (0..MAX_CONNECTIONS_PER_IP).map(|_| limits.try_take(ip).unwrap()).collect();
+        assert!(limits.try_take(ip).is_none());
+        drop(slots);
+        assert!(limits.try_take(ip).is_some());
+        // The hub PC can open many (demo script), up to the total limit.
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let many: Vec<_> = (0..MAX_CONNECTIONS).map_while(|_| limits.try_take(local)).collect();
+        assert_eq!(many.len(), MAX_CONNECTIONS);
+        assert!(limits.try_take(ip).is_none());
     }
 
     #[test]
