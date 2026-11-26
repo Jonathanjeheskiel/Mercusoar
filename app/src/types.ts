@@ -27,6 +27,8 @@ export type SetupConfig =
 export type LabConfig = {
   role: "student" | "assistant";
   seat: Seat | null;
+  /** Fixed PC number for a student PC. Without it the student types it. */
+  pc: number | null;
   hub_address: string | null;
 };
 

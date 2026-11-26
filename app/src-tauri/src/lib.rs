@@ -32,13 +32,15 @@ async fn start_hub() -> Result<HubInfo, String> {
 
 /// Lab settings installed by the lab admins, so students cannot pick a role.
 /// File: C:\ProgramData\Mercusoar\config.json
-///   student PCs: { "role": "student", "hub_address": "192.168.1.10" }
+///   student PCs: { "role": "student", "pc": 7, "hub_address": "192.168.1.10" }
 ///   PC 1:        { "role": "assistant", "seat": "Front" }
 ///   PC 40:       { "role": "assistant", "seat": "Back", "hub_address": "192.168.1.10" }
+/// "pc" is optional: without it the student types their PC number.
 #[derive(Serialize, Deserialize)]
 struct LabConfig {
     role: String,
     seat: Option<String>,
+    pc: Option<u32>,
     hub_address: Option<String>,
 }
 
@@ -56,9 +58,20 @@ fn load_config() -> Result<Option<LabConfig>, String> {
 fn parse_config(text: &str) -> Result<LabConfig, String> {
     let config: LabConfig = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
     match (config.role.as_str(), config.seat.as_deref()) {
-        ("student", _) | ("assistant", Some("Front" | "Back")) => Ok(config),
-        _ => Err("role must be \"student\", or \"assistant\" with seat \"Front\" or \"Back\"".into()),
+        ("student", _) | ("assistant", Some("Front" | "Back")) => {}
+        _ => return Err("role must be \"student\", or \"assistant\" with seat \"Front\" or \"Back\"".into()),
     }
+    if let Some(pc) = config.pc {
+        if config.role != "student" || !(2..=39).contains(&pc) {
+            return Err("\"pc\" is only for students and must be 2 to 39".into());
+        }
+    }
+    if let Some(address) = &config.hub_address {
+        if address != "localhost" && address.parse::<std::net::Ipv4Addr>().is_err() {
+            return Err("\"hub_address\" must be an IPv4 address like 192.168.1.10".into());
+        }
+    }
+    Ok(config)
 }
 
 /// Best guess at this PC's address on the lab network.
@@ -92,6 +105,7 @@ mod tests {
         assert!(parse_config(r#"{"role":"student","hub_address":"192.168.1.10"}"#).is_ok());
         assert!(parse_config(r#"{"role":"assistant","seat":"Front"}"#).is_ok());
         assert!(parse_config(r#"{"role":"assistant","seat":"Back","hub_address":"192.168.1.10"}"#).is_ok());
+        assert!(parse_config(r#"{"role":"student","pc":7,"hub_address":"192.168.1.10"}"#).is_ok());
     }
 
     #[test]
@@ -100,5 +114,10 @@ mod tests {
         assert!(parse_config(r#"{"role":"assistant","seat":"Middle"}"#).is_err());
         assert!(parse_config(r#"{"role":"admin"}"#).is_err());
         assert!(parse_config("not json").is_err());
+        assert!(parse_config(r#"{"role":"student","pc":1}"#).is_err()); // admin PC
+        assert!(parse_config(r#"{"role":"student","pc":40}"#).is_err());
+        assert!(parse_config(r#"{"role":"assistant","seat":"Front","pc":7}"#).is_err());
+        assert!(parse_config(r#"{"role":"student","hub_address":"evil.example/x"}"#).is_err());
+        assert!(parse_config(r#"{"role":"student","hub_address":"192.168.1.300"}"#).is_err());
     }
 }

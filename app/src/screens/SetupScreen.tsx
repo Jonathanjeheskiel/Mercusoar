@@ -38,6 +38,7 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
         if (!config) return;
         setRole(config.role);
         if (config.seat) chooseSeat(config.seat);
+        if (config.pc) setPc(String(config.pc));
         if (config.hub_address) setHubAddress(config.hub_address);
       })
       .catch((e) => setLabError(String(e)));
@@ -52,6 +53,7 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
   const locked = !!lab; // role and seat come from the lab config
   const needsAddress = role === "student" || !hostHub;
   const addressFromConfig = !!lab?.hub_address;
+  const pcFromConfig = !!lab?.pc;
   const needsPasscode = role === "assistant" && !hostHub;
 
   function handleStart(e: React.FormEvent) {
@@ -150,7 +152,9 @@ export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig
           </fieldset>
         )}
 
-        {role === "student" && (
+        {role === "student" && pcFromConfig && <p className="fixed-seat">Student · PC {pc}</p>}
+
+        {role === "student" && !pcFromConfig && (
           <div className="field">
             <label htmlFor="pc">Your PC number</label>
             <input
