@@ -16,17 +16,23 @@ function isValidAddress(text: string) {
 // Passcodes look like K7Q-4MZ (the dash is optional when typing)
 const PASSCODE = /^[A-Z0-9]{3}-?[A-Z0-9]{3}$/i;
 
-export default function SetupScreen({ onStart }: { onStart: (config: SetupConfig) => void }) {
+type Props = {
+  onStart: (config: SetupConfig) => void;
+  /** Answers from the last Start, so pressing Exit does not wipe the form. */
+  previous: SetupConfig | null;
+};
+
+export default function SetupScreen({ onStart, previous }: Props) {
   // Lab config: undefined = still loading, null = none found (developer laptop).
   const [lab, setLab] = useState<LabConfig | null | undefined>(undefined);
   const [labError, setLabError] = useState("");
 
-  // Form state: one useState per field.
-  const [role, setRole] = useState<Role>("student");
-  const [pc, setPc] = useState("2");
-  const [seat, setSeat] = useState<Seat>("Front");
-  const [hostHub, setHostHub] = useState(true);
-  const [hubAddress, setHubAddress] = useState("127.0.0.1");
+  // Form state: one useState per field. The passcode is never kept.
+  const [role, setRole] = useState<Role>(previous?.role ?? "student");
+  const [pc, setPc] = useState(previous?.role === "student" ? String(previous.pc) : "2");
+  const [seat, setSeat] = useState<Seat>(previous?.role === "assistant" ? previous.seat : "Front");
+  const [hostHub, setHostHub] = useState(previous?.role === "assistant" ? previous.hostHub : true);
+  const [hubAddress, setHubAddress] = useState(previous?.hubAddress ?? "127.0.0.1");
   const [passcode, setPasscode] = useState("");
   const [errors, setErrors] = useState<Errors>({});
 
