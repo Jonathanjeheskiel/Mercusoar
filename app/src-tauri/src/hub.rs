@@ -32,6 +32,10 @@ pub const PORT: u16 = 47800;
 /// Longest question a student can type (characters).
 const MAX_QUESTION_LEN: usize = 200;
 
+/// Student PCs are 2-39. PC 1 (front) and PC 40 (back) are admin PCs.
+/// Must match FIRST_STUDENT_PC / LAST_STUDENT_PC in src/types.ts.
+const STUDENT_PCS: std::ops::RangeInclusive<u32> = 2..=39;
+
 /// Wrong passcodes allowed from one computer before it is locked out.
 /// The 1 s delay per wrong guess alone does not stop guessing, because a
 /// script can open many connections at once.
@@ -48,6 +52,9 @@ struct Flare {
     created_ms: u64,
     /// Name of the assistant who clicked "I'll take it", e.g. "Front".
     claimed_by: Option<String>,
+    /// Computer that sent it. Never sent to anyone.
+    #[serde(skip)]
+    ip: IpAddr,
 }
 
 /// Everything a client is allowed to send to the hub.
@@ -157,12 +164,22 @@ impl Hub {
     fn handle(&mut self, cid: u64, msg: ClientMsg) -> bool {
         match msg {
             ClientMsg::HelloStudent { pc } => {
-                if let Some(c) = self.clients.get_mut(&cid) {
-                    // A window picks its role once; it cannot switch later.
-                    if matches!(c.role, Role::Unknown) {
-                        c.role = Role::Student(pc);
-                    }
+                let Some(c) = self.clients.get(&cid) else { return false };
+                // A window picks its role once; it cannot switch later.
+                if !matches!(c.role, Role::Unknown) {
+                    return true;
                 }
+                let ip = c.ip;
+                if !STUDENT_PCS.contains(&pc) {
+                    self.reject(cid, "That is not a student PC number.");
+                    return false;
+                }
+                if let Some(reason) = self.pc_taken(pc, ip) {
+                    self.reject(cid, &reason);
+                    return false;
+                }
+                let Some(c) = self.clients.get_mut(&cid) else { return false };
+                c.role = Role::Student(pc);
             }
             ClientMsg::HelloAssistant { name, passcode } => {
                 let Some(c) = self.clients.get(&cid) else { return false };
@@ -186,6 +203,7 @@ impl Hub {
             }
             ClientMsg::Flare { question } => {
                 let Some(pc) = self.student_pc(cid) else { return true };
+                let Some(ip) = self.clients.get(&cid).map(|c| c.ip) else { return true };
                 let question: String = question.trim().chars().take(MAX_QUESTION_LEN).collect();
                 // One open Flare per PC: sending again just updates the question
                 // and keeps the student's place in the queue.
@@ -199,6 +217,7 @@ impl Hub {
                         question,
                         created_ms: now_ms(),
                         claimed_by: None,
+                        ip,
                     });
                 }
             }
@@ -259,6 +278,34 @@ impl Hub {
 
     fn record_failed_auth(&mut self, ip: IpAddr) {
         self.failed_auth.entry(ip).or_insert((0, Instant::now())).0 += 1;
+    }
+
+    /// Stops one student from posing as another PC (to read or cancel that
+    /// PC's Flare). While a PC number is online or has an open Flare, it
+    /// belongs to the computer that used it, and that computer cannot use a
+    /// second PC number at the same time. Typing the wrong number by mistake
+    /// is fixed by pressing Exit and starting again.
+    ///
+    /// Windows on the hub PC itself (127.0.0.1) are exempt, so the demo script
+    /// and single-laptop testing keep working.
+    fn pc_taken(&self, pc: u32, ip: IpAddr) -> Option<String> {
+        if ip.is_loopback() {
+            return None;
+        }
+        let students = self.clients.values().filter_map(|c| match c.role {
+            Role::Student(p) => Some((p, c.ip)),
+            _ => None,
+        });
+        let flares = self.flares.iter().map(|f| (f.pc, f.ip));
+        for (p, owner) in students.chain(flares) {
+            if p == pc && owner != ip {
+                return Some(format!("PC {pc} is already in use by another computer. Check your PC number."));
+            }
+            if p != pc && owner == ip {
+                return Some(format!("This computer is already signed in as PC {p}."));
+            }
+        }
+        None
     }
 
     fn student_pc(&self, cid: u64) -> Option<u32> {
@@ -485,6 +532,59 @@ mod tests {
         let hello = ClientMsg::HelloAssistant { name: "x".repeat(10_000), passcode: "K7Q-4MZ".into() };
         assert!(!hub.handle(cid, hello));
         assert!(hub.assistant_name(cid).is_none());
+    }
+
+    fn student_hello(hub: &mut Hub, ip: &str, pc: u32) -> (u64, bool) {
+        let (cid, _rx) = connect_from(hub, ip);
+        let ok = hub.handle(cid, ClientMsg::HelloStudent { pc });
+        (cid, ok)
+    }
+
+    #[test]
+    fn admin_and_out_of_range_pc_numbers_are_rejected() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        for pc in [0, 1, 40, 41, u32::MAX] {
+            let (cid, ok) = student_hello(&mut hub, "192.168.1.20", pc);
+            assert!(!ok, "PC {pc} should be rejected");
+            assert!(hub.student_pc(cid).is_none());
+        }
+    }
+
+    #[test]
+    fn another_computer_cannot_pose_as_an_online_pc() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (real, ok) = student_hello(&mut hub, "192.168.1.7", 7);
+        assert!(ok);
+        hub.handle(real, ClientMsg::Flare { question: "secret".into() });
+
+        let (fake, ok) = student_hello(&mut hub, "192.168.1.9", 7);
+        assert!(!ok);
+        hub.handle(fake, ClientMsg::Cancel);
+        assert_eq!(hub.flares.len(), 1);
+
+        // Still protected after the real PC disconnects, while its Flare is open.
+        hub.clients.remove(&real);
+        assert!(!student_hello(&mut hub, "192.168.1.9", 7).1);
+        // The real PC can reconnect and keeps its place.
+        assert!(student_hello(&mut hub, "192.168.1.7", 7).1);
+    }
+
+    #[test]
+    fn one_computer_cannot_be_two_pcs_at_once() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (first, ok) = student_hello(&mut hub, "192.168.1.9", 9);
+        assert!(ok);
+        assert!(!student_hello(&mut hub, "192.168.1.9", 12).1);
+        // After Exit (disconnect, no Flare) it may pick another number.
+        hub.clients.remove(&first);
+        assert!(student_hello(&mut hub, "192.168.1.9", 12).1);
+    }
+
+    #[test]
+    fn hub_pc_itself_can_simulate_many_students() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        assert!(student_hello(&mut hub, "127.0.0.1", 5).1);
+        assert!(student_hello(&mut hub, "127.0.0.1", 6).1);
     }
 
     #[test]
