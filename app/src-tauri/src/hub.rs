@@ -263,19 +263,19 @@ impl Hub {
                     }
                 }
             }
+            // Only the assistant who claimed a Flare can release or resolve it,
+            // so one assistant cannot undo the other's work by mistake.
             ClientMsg::Release { id } => {
-                if self.assistant_name(cid).is_none() {
-                    return true;
-                }
-                if let Some(f) = self.flares.iter_mut().find(|f| f.id == id) {
+                let Some(name) = self.assistant_name(cid) else { return true };
+                if let Some(f) = self.flares.iter_mut().find(|f| f.id == id && f.claimed_by.as_ref() == Some(&name)) {
                     f.claimed_by = None;
                 }
             }
             ClientMsg::Resolve { id } => {
-                if self.assistant_name(cid).is_none() {
-                    return true;
-                }
-                if let Some(pos) = self.flares.iter().position(|f| f.id == id) {
+                let Some(name) = self.assistant_name(cid) else { return true };
+                if let Some(pos) =
+                    self.flares.iter().position(|f| f.id == id && f.claimed_by.as_ref() == Some(&name))
+                {
                     let pc = self.flares.remove(pos).pc;
                     // Tell that student their question was answered.
                     self.send_to_pc(pc, json!({ "type": "resolved" }));
@@ -283,6 +283,20 @@ impl Hub {
             }
         }
         true
+    }
+
+    /// Remove a window. When the last window of an assistant seat closes, its
+    /// claimed Flares go back to waiting, so the other assistant can take them
+    /// instead of seeing "taken" forever.
+    fn disconnect(&mut self, cid: u64) {
+        let Some(c) = self.clients.remove(&cid) else { return };
+        let Role::Assistant(name) = c.role else { return };
+        let still_here = self.clients.values().any(|c| matches!(&c.role, Role::Assistant(n) if *n == name));
+        if !still_here {
+            for f in self.flares.iter_mut().filter(|f| f.claimed_by.as_ref() == Some(&name)) {
+                f.claimed_by = None;
+            }
+        }
     }
 
     /// Tell a client why it is being disconnected.
@@ -400,7 +414,7 @@ impl Hub {
             }
         }
         for cid in stuck {
-            self.clients.remove(&cid);
+            self.disconnect(cid);
         }
     }
 }
@@ -577,7 +591,7 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub, 
     // Disconnected. The student's Flare (if any) stays in the queue on purpose,
     // so a crash or network blip does not lose their place.
     let mut h = hub.lock().await;
-    h.clients.remove(&cid); // drops this client's sender, so the writer finishes
+    h.disconnect(cid); // drops this client's sender, so the writer finishes
     h.broadcast();
     drop(h);
     // Let queued messages (e.g. "Wrong passcode") go out first, but do not
@@ -764,6 +778,42 @@ mod tests {
             }
         });
         assert!(closed.await.is_ok());
+    }
+
+    #[test]
+    fn only_the_claiming_assistant_can_release_or_resolve() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (front, _r1) = connect(&mut hub);
+        let (back, _r2) = connect(&mut hub);
+        let (s, _r3) = connect(&mut hub);
+        hub.handle(front, assistant_hello("K7Q-4MZ"));
+        hub.handle(back, ClientMsg::HelloAssistant { name: "Back".into(), passcode: "K7Q-4MZ".into() });
+        hub.handle(s, ClientMsg::HelloStudent { pc: 12 });
+        hub.handle(s, ClientMsg::Flare { question: "".into() });
+        let id = hub.flares[0].id;
+
+        hub.handle(back, ClientMsg::Resolve { id }); // unclaimed: nothing happens
+        assert_eq!(hub.flares.len(), 1);
+        hub.handle(front, ClientMsg::Claim { id });
+        hub.handle(back, ClientMsg::Release { id });
+        hub.handle(back, ClientMsg::Resolve { id });
+        assert_eq!(hub.flares[0].claimed_by.as_deref(), Some("Front"));
+        hub.handle(front, ClientMsg::Resolve { id });
+        assert!(hub.flares.is_empty());
+    }
+
+    #[test]
+    fn claims_are_released_when_the_assistant_leaves() {
+        let mut hub = Hub::new("K7Q-4MZ".into());
+        let (front, _r1) = connect(&mut hub);
+        let (s, _r2) = connect(&mut hub);
+        hub.handle(front, assistant_hello("K7Q-4MZ"));
+        hub.handle(s, ClientMsg::HelloStudent { pc: 12 });
+        hub.handle(s, ClientMsg::Flare { question: "".into() });
+        let id = hub.flares[0].id;
+        hub.handle(front, ClientMsg::Claim { id });
+        hub.disconnect(front);
+        assert!(hub.flares[0].claimed_by.is_none());
     }
 
     #[test]
