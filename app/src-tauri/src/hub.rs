@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
 /// TCP port the hub listens on. Every PC must use the same port.
@@ -391,9 +393,35 @@ pub async fn start() -> Result<String, String> {
     Ok(passcode)
 }
 
+/// Browsers attach an Origin header to WebSocket connections. Without this
+/// check, any web page opened on a lab PC (or on the hub PC) could connect to
+/// the hub in the background and act as a student. Only the Mercusoar window
+/// is allowed. Clients without an Origin header (not a browser, e.g. the demo
+/// script) are let through; they still have to follow every hub rule.
+fn origin_allowed(origin: Option<&str>) -> bool {
+    let Some(origin) = origin else { return true };
+    // Mercusoar's own window: Windows uses http://tauri.localhost,
+    // macOS and Linux use tauri://localhost.
+    if matches!(origin, "http://tauri.localhost" | "https://tauri.localhost" | "tauri://localhost") {
+        return true;
+    }
+    // `npm run tauri dev` serves the window from the Vite dev server.
+    cfg!(debug_assertions) && origin.starts_with("http://") && origin.ends_with(":1420")
+}
+
 /// Serve one connected window until it disconnects.
 async fn handle_connection(stream: TcpStream, addr: SocketAddr, hub: SharedHub) {
-    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+    let check_origin = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+        let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+        if origin_allowed(origin) {
+            Ok(res)
+        } else {
+            let mut deny = ErrorResponse::new(Some("origin not allowed".into()));
+            *deny.status_mut() = StatusCode::FORBIDDEN;
+            Err(deny)
+        }
+    };
+    let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, check_origin).await else { return };
     let (mut ws_out, mut ws_in) = ws.split();
 
     // Register the client with a channel we can push messages into.
@@ -515,6 +543,16 @@ mod tests {
         assert!(hub.handle(cid, assistant_hello(" k7q-4mz ")));
         assert_eq!(hub.assistant_name(cid).as_deref(), Some("Front"));
         assert_eq!(inbox(&mut rx)[0]["type"], "auth_ok");
+    }
+
+    #[test]
+    fn only_the_app_window_and_non_browsers_may_connect() {
+        assert!(origin_allowed(None));
+        assert!(origin_allowed(Some("http://tauri.localhost")));
+        assert!(origin_allowed(Some("tauri://localhost")));
+        assert!(!origin_allowed(Some("https://evil.example")));
+        assert!(!origin_allowed(Some("http://tauri.localhost.evil.example")));
+        assert!(!origin_allowed(Some("null")));
     }
 
     #[test]
