@@ -41,7 +41,12 @@ export function useHub(
         setStatus("connected");
       };
       ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data) as HubMessage;
+        let msg: HubMessage;
+        try {
+          msg = JSON.parse(event.data) as HubMessage;
+        } catch {
+          return; // ignore anything that is not valid JSON
+        }
         if (msg.type === "auth_error") {
           stopped = true; // retrying with the same wrong passcode is pointless
           setStatus("rejected");

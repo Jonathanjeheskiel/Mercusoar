@@ -61,7 +61,8 @@ export default function AssistantScreen({ seat, hostHub, hubAddress, passcode, o
   }, []);
   const hubNow = Date.now() + clockOffset.current;
 
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  // `at` changes on every click, so clicking the same seat again scrolls again.
+  const [selected, setSelected] = useState<{ id: number; at: number } | null>(null);
   const [projected, setProjected] = useState<string | null>(null);
 
   const waiting = flares.filter((f) => f.claimed_by === null).length;
@@ -107,7 +108,7 @@ export default function AssistantScreen({ seat, hostHub, hubAddress, passcode, o
       <div className="assistant-layout">
         <section className="card" aria-labelledby="chart-title">
           <h2 id="chart-title">Lab Chart</h2>
-          <LabChart flares={flares} online={online} onSelect={setSelectedId} />
+          <LabChart flares={flares} online={online} onSelect={(id) => setSelected({ id, at: Date.now() })} />
         </section>
 
         <section className="card queue-card" aria-labelledby="queue-title">
@@ -125,7 +126,7 @@ export default function AssistantScreen({ seat, hostHub, hubAddress, passcode, o
                   position={i + 1}
                   waitMs={hubNow - f.created_ms}
                   mySeat={seat}
-                  selected={selectedId === f.id}
+                  selectKey={selected?.id === f.id ? selected.at : null}
                   onClaim={() => send({ type: "claim", id: f.id })}
                   onRelease={() => send({ type: "release", id: f.id })}
                   onResolve={() => send({ type: "resolve", id: f.id })}
@@ -154,7 +155,8 @@ type ItemProps = {
   position: number;
   waitMs: number;
   mySeat: Seat;
-  selected: boolean;
+  /** Set when this item was picked on the Lab Chart; changes on every pick. */
+  selectKey: number | null;
   onClaim: () => void;
   onRelease: () => void;
   onResolve: () => void;
@@ -169,11 +171,11 @@ function QueueItem(p: ItemProps) {
 
   // Clicking a seat on the Lab Chart scrolls to its queue entry.
   useEffect(() => {
-    if (p.selected) ref.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [p.selected]);
+    if (p.selectKey !== null) ref.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [p.selectKey]);
 
   return (
-    <li ref={ref} className={`queue-item ${p.selected ? "selected" : ""} ${flare.claimed_by ? "claimed" : ""}`}>
+    <li ref={ref} className={`queue-item ${p.selectKey !== null ? "selected" : ""} ${flare.claimed_by ? "claimed" : ""}`}>
       <div className="queue-head">
         <span className="queue-pos">#{p.position}</span>
         <span className="queue-pc">PC {flare.pc}</span>

@@ -9,12 +9,18 @@ import Logo from "./Logo";
 export default function ProjectorView({ question, onClose }: { question: string; onClose: () => void }) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
+  // The parent re-renders every second (wait timers), which gives us a new
+  // onClose each time. Keep the latest one in a ref so the effect below runs
+  // only once: otherwise focus jumps back to Close every second.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     closeRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCloseRef.current();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   return (
     <div className="projector" role="dialog" aria-modal="true" aria-labelledby="projector-label">
