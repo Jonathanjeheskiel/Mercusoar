@@ -408,9 +408,16 @@ impl Hub {
 /// Start listening on every network interface. Returns the session passcode
 /// once the port is open, then keeps accepting connections in the background.
 pub async fn start() -> Result<String, String> {
-    let listener = TcpListener::bind(("0.0.0.0", PORT))
+    start_on(PORT).await.map(|(passcode, _)| passcode)
+}
+
+/// Same as `start`, on any port (0 = pick a free one). Returns the passcode
+/// and the port actually used.
+async fn start_on(port: u16) -> Result<(String, u16), String> {
+    let listener = TcpListener::bind(("0.0.0.0", port))
         .await
-        .map_err(|e| format!("could not open port {PORT}: {e}"))?;
+        .map_err(|e| format!("could not open port {port}: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     let passcode = new_passcode()?;
     let hub: SharedHub = Arc::new(Mutex::new(Hub::new(passcode.clone())));
@@ -428,7 +435,7 @@ pub async fn start() -> Result<String, String> {
             }
         }
     });
-    Ok(passcode)
+    Ok((passcode, port))
 }
 
 /// Counts open connections, in total and per computer.
@@ -696,6 +703,67 @@ mod tests {
         let many: Vec<_> = (0..MAX_CONNECTIONS).map_while(|_| limits.try_take(local)).collect();
         assert_eq!(many.len(), MAX_CONNECTIONS);
         assert!(limits.try_take(ip).is_none());
+    }
+
+    /// Runs the real hub on a free port and talks to it over WebSockets.
+    #[tokio::test]
+    async fn end_to_end_over_the_network() {
+        use tokio_tungstenite::connect_async;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let (passcode, port) = start_on(0).await.unwrap();
+        let url = format!("ws://127.0.0.1:{port}");
+
+        async fn next_json<S>(ws: &mut S) -> serde_json::Value
+        where
+            S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+        {
+            loop {
+                let msg = tokio::time::timeout(Duration::from_secs(5), ws.next()).await.unwrap();
+                if let Some(Ok(Message::Text(t))) = msg {
+                    return serde_json::from_str(&t).unwrap();
+                }
+            }
+        }
+
+        // A web page in a browser is refused during the handshake.
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert("origin", "https://evil.example".parse().unwrap());
+        assert!(connect_async(req).await.is_err());
+
+        // A student sends a Flare and sees its place in line.
+        let (mut student, _) = connect_async(&url).await.unwrap();
+        student.send(Message::text(r#"{"type":"hello_student","pc":5}"#)).await.unwrap();
+        student.send(Message::text(r#"{"type":"flare","question":"Task 3"}"#)).await.unwrap();
+        loop {
+            let m = next_json(&mut student).await;
+            if m["type"] == "my_flare" && !m["flare"].is_null() {
+                assert_eq!(m["flare"]["position"], 1);
+                break;
+            }
+        }
+
+        // The assistant logs in (passcode typed without the dash) and sees it.
+        let (mut assistant, _) = connect_async(&url).await.unwrap();
+        let hello = json!({ "type": "hello_assistant", "name": "Back", "passcode": passcode.replace('-', "") });
+        assistant.send(Message::text(hello.to_string())).await.unwrap();
+        assert_eq!(next_json(&mut assistant).await["type"], "auth_ok");
+        let state = next_json(&mut assistant).await;
+        assert_eq!(state["flares"][0]["pc"], 5);
+        assert_eq!(state["flares"][0]["question"], "Task 3");
+
+        // An oversized message closes the connection.
+        let (mut big, _) = connect_async(&url).await.unwrap();
+        let _ = big.send(Message::text("x".repeat(MAX_MESSAGE_BYTES + 1))).await;
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match big.next().await {
+                    None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                    _ => {}
+                }
+            }
+        });
+        assert!(closed.await.is_ok());
     }
 
     #[test]
