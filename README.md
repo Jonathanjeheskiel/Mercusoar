@@ -183,7 +183,7 @@ In line with the STACK 2026 rules, we disclose that we used AI tools (Claude by 
 
 ## Team
 
-**[Mercusoar]**, BINUS University, Computer Science
+**Mercusoar**, BINUS University, Computer Science
 
 - Jonathan Jeheskiel
 - Steven Widinata
