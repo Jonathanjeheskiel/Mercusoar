@@ -3,7 +3,8 @@
 // Usage (from the app folder, while an assistant window hosts the hub):
 //   node scripts/demo-students.mjs            -> 5 fake students send Flares
 //   node scripts/demo-students.mjs 8          -> 8 fake students
-//   node scripts/demo-students.mjs 5 192.168.1.10
+// Run it ON THE HUB LAPTOP. From any other computer the hub accepts only one
+// student PC, because one computer cannot pose as several PCs.
 // Press Ctrl+C to disconnect them. Their Flares stay in the queue until resolved.
 
 const count = Number(process.argv[2] ?? 5);
@@ -44,6 +45,9 @@ pcs.forEach((pc, i) => {
       console.log(`PC ${pc}: ${who}`);
     }
     if (msg.type === "resolved") console.log(`PC ${pc}: resolved`);
+    // The hub lets one computer be only one student PC. Only the hub's own
+    // laptop (127.0.0.1) may simulate several, so run this script there.
+    if (msg.type === "auth_error") console.log(`PC ${pc}: refused by the hub: ${msg.message}`);
   };
   ws.onerror = () => console.log(`PC ${pc}: cannot reach the hub at ${host}:${PORT}`);
 });
