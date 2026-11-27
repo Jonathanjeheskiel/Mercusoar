@@ -7,7 +7,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "start": "tauri dev",
+    "window": "src-tauri\\target\\debug\\mercusoar.exe",
+    "demo": "node scripts/demo-students.mjs",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "build:exe": "tauri build --no-bundle"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
