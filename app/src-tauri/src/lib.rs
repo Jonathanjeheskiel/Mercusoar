@@ -1,6 +1,7 @@
+mod discovery;
 mod hub;
 
-use std::net::UdpSocket;
+use std::net::{Ipv4Addr, UdpSocket};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -23,11 +24,26 @@ async fn start_hub() -> Result<HubInfo, String> {
     let mut saved = HUB_PASSCODE.lock().await;
     if saved.is_none() {
         *saved = Some(hub::start().await?);
+        // Let student PCs find this hub without typing its address. If the UDP
+        // port is busy, the hub still works: students can type the address.
+        let hub_id = discovery::new_hub_id()?;
+        if let Err(e) = discovery::start_responder(hub_id, discovery::DISCOVERY_PORT).await {
+            eprintln!("hub discovery is off: {e}");
+        }
     }
     Ok(HubInfo {
         address: format!("{}:{}", local_ip(), hub::PORT),
         passcode: saved.clone().unwrap_or_default(),
     })
+}
+
+/// Looks for hubs on the local network for about 1.5 seconds.
+/// Returns one address per hub that answered (usually one).
+#[tauri::command]
+async fn find_hubs() -> Result<Vec<String>, String> {
+    let my_ip = local_ip().parse::<Ipv4Addr>().ok();
+    let targets = discovery::targets(discovery::DISCOVERY_PORT, my_ip);
+    discovery::find_hubs_on(&targets, discovery::SEARCH_TIME).await
 }
 
 /// Lab settings installed by the lab admins, so students cannot pick a role.
@@ -36,6 +52,9 @@ async fn start_hub() -> Result<HubInfo, String> {
 ///   PC 1:        { "role": "assistant", "seat": "Front" }
 ///   PC 40:       { "role": "assistant", "seat": "Back", "hub_address": "192.168.1.10" }
 /// "pc" is optional: without it the student types their PC number.
+/// "hub_address" is optional for students: without it the app finds the hub
+/// on the network by itself. With it, the app never searches, which is safer
+/// in a real lab (nobody can pretend to be the hub).
 #[derive(Serialize, Deserialize)]
 struct LabConfig {
     role: String,
@@ -90,7 +109,7 @@ fn local_ip() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![start_hub, load_config])
+        .invoke_handler(tauri::generate_handler![start_hub, load_config, find_hubs])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
