@@ -13,17 +13,49 @@
   STACK 2026 by GDGoC ITB · Case 1: Smarter Campus and Learning · BINUS University
 </p>
 
+<p align="center">
+  <a href="https://mercusoar-prototype.vercel.app"><b>Clickable prototype</b></a> ·
+  <a href="https://www.figma.com/design/MVSDxDAubJHTvxX75jbAkN"><b>Figma design file</b></a> ·
+  <a href="#design">Design</a> ·
+  <a href="#getting-started">Run it yourself</a>
+</p>
+
+<p align="center">
+  <img src="docs/images/assistant-console.png" width="820" alt="The assistant console: the Lab Chart of 40 seats on the left, the queue of Flares with wait timers on the right">
+</p>
+
 ---
 
 ## The problem
 
-A BINUS computer lab has about 40 PCs and two lab assistants ("Blue Jackets"). One assistant sits at the admin PC at the front (PC 1), the other at the back (PC 40).
+A BINUS computer lab has about 40 PCs and two lab assistants ("Blue Jackets"). One assistant sits at the admin PC at the front (PC 1), the other at the back (PC 40). First- to third-semester Computer Science students spend their practicum sessions here, working through numbered tasks.
 
-When a student gets stuck, the only way to get help is to raise a hand in front of everyone. Many students would rather stay stuck than do that, so they fall behind quietly. The assistants also can't tell who needs help or who has been waiting longest.
+When a student gets stuck, the only way to get help is to raise a hand or call an assistant over, in front of everyone. That causes three problems:
+
+1. **Stuck students stay silent.** In our survey, 36% said they sometimes don't ask even when they are stuck. In the two classes we observed (LA08 and LB08, 60 students), about three in four stuck students stayed silent instead of raising a hand.
+2. **Waiting is invisible.** A student who asks can't see their place in line, and help goes to whoever catches an assistant's eye. 49% of students want to know their place in line.
+3. **Assistants repeat themselves.** Both assistants we interviewed are called many times per session, often for a question they just answered at another PC.
+
+### Our evidence
+
+| Source | What we did |
+|---|---|
+| Survey | 45 BINUS Computer Science students, 27 November 2026 |
+| Observation | LA08 and LB08, third-semester classes of 30 students each, 27 September to 9 November 2026 |
+| Interviews | Two BINUS lab assistants, 9 November 2026 |
+
+The survey also corrected one of our assumptions: embarrassment holds some students back (22%) but not most, and long waits are uncommon (24%). Silence itself is common, so Mercusoar makes asking effortless for everyone and private for those who need it.
 
 ## The solution
 
-Mercusoar is a Windows desktop app that runs on every lab PC.
+Mercusoar is a Windows desktop app that runs on every lab PC. It turns the raised hand into a private request on the student's own PC, called a **Flare**.
+
+| 1. Ask privately | 2. Get help in a fair order | 3. Learn together |
+|---|---|---|
+| <img src="docs/images/student-send-flare.png" width="270" alt="Student screen with one Send a Flare button and an optional question"> | <img src="docs/images/assistant-console.png" width="270" alt="Assistant console with the Lab Chart and the queue"> | <img src="docs/images/projector-view.png" width="270" alt="Projector view showing only the question, without the PC number"> |
+| PC 14 sends a Flare with an optional question. Classmates see nothing. | The Flare lights up on the Lab Chart, and one assistant claims it. | A repeated question goes on the projector, without its PC number. |
+
+*Screenshots from the working app, with simulated students.*
 
 | | Student PC | Lab assistant PC |
 |---|---|---|
@@ -41,15 +73,54 @@ Mercusoar is a Windows desktop app that runs on every lab PC.
 - **Assistant lock.** The assistant view needs a passcode that changes every session. A PC that guesses wrong too many times is locked out.
 - **Lab config file.** Each lab PC can be fixed to its role and PC number, so students can't pick the assistant role.
 
+### What makes it different
+
+A help button on its own is not new. Classroom suites such as Veyon, NetSupport School and LanSchool are built for supervision: the teacher can open any screen without asking. Mercusoar is built around four rules instead, and the hub's code enforces them:
+
+| Rule | Status | What it means |
+|---|---|---|
+| **Private by default** | ✅ Built | Students receive only their own Flare; only assistants see PC numbers. |
+| **Fair by default** | ✅ Built | Oldest Flare first; only the assistant who claimed a Flare can resolve it. |
+| **Consent before access** | 🔜 Planned | Screen view and control only after the student approves, with an indicator on screen. |
+| **Local only** | ✅ Built | Every message stays on the lab network. |
+
 ### Roadmap
 
 | Status | Feature |
 |---|---|
 | ✅ Built | Real-time hub, Flare, queue, Lab Chart, claim / release / resolve, projector view, passcode lock, lab config |
-| 🔜 Next | **Beam**: after a Flare, the assistant can view or control that student's screen. The Flare counts as the student's consent. |
-| 🔜 Next | **Logbook**: a history of help requests, stored in SQLite, so assistants can see which topics students struggle with |
+| 🔜 Next | **Beam**: after a Flare, the assistant can ask to view that student's screen and send a private hint. Nothing opens until the student approves, a bar stays on screen with a Stop button, and remote control needs a second approval. |
+| 🔜 Next | **Logbook**: a history of help requests, stored in SQLite, with a session summary by task so assistants see which tasks students struggle with |
 | 🔜 Next | Room layouts for every lab, reconnecting automatically after a restart, and finding the hub automatically |
 | 🔜 Next | A Windows installer, and a pilot in a real BINUS lab |
+
+**Plan to Final Day (16 December 2026):** a mini-lab trial with 6 to 10 volunteer classmates from 12 to 15 December. Each does one task set twice, once raising hands and once with Mercusoar, in swapped order. We will measure how many stuck students ask, waiting time and repeated explanations. On Final Day we will build remote control behind a second approval (FD1), the session summary from the Logbook (FD2), and fixes for the most serious problems found in the trial (FD3).
+
+## Design
+
+We designed Mercusoar before writing code. Everything below is also in the [Figma design file](https://www.figma.com/design/MVSDxDAubJHTvxX75jbAkN) and the [clickable prototype](https://mercusoar-prototype.vercel.app), where built screens and planned designs are labelled.
+
+### User personas
+
+Two composite personas, built only from our survey, interviews and observation. The names are invented; every pain point cites its source.
+
+<img src="docs/images/personas.png" width="820" alt="Personas: Nadia, 19, a third-semester student who sometimes stays silent when stuck; Bima, 21, a lab assistant who is called many times for the same question">
+
+### User flow
+
+From a student getting stuck to the help being shared with the class. Dashed steps are planned, not built yet.
+
+<img src="docs/images/user-flow.png" width="820" alt="User flow: student is stuck, sends a Flare, sees their place in line, an assistant claims it, helps at the PC or with consented screen view, and a repeated question is explained at the front">
+
+### Low-fidelity wireframes
+
+Hand-drawn sketches of every screen. W1, W2, W3, W6 and W7 are built; W5, W8 and the hint in W4 are planned. The numbered marks are the design decisions noted under each sketch.
+
+<img src="docs/images/wireframes.png" width="820" alt="Eight hand-drawn wireframes: setup, send a Flare, waiting in line, help is coming, consent to screen view, assistant console, projector view and session summary">
+
+### Visual design
+
+The app keeps the night-sea look of the lighthouse logo. **Amber** is kept for Flares, so a waiting student stands out on the Lab Chart at a glance, and **teal** means someone is being helped. It uses Windows' built-in Segoe UI, so lab PCs need no extra fonts. Every text colour pair passes WCAG AA contrast; the lowest is 5.2:1.
 
 ## How it works
 
@@ -174,8 +245,10 @@ app/
 ## Privacy and honesty notes
 
 - **Anonymous to classmates:** no student ever receives another student's PC number or question.
+- **Minimal data:** a Flare holds only a PC number, an optional question, when it was sent and who claimed it. There are no names, accounts or student IDs, and the queue ends with the session.
+- **Tested:** all 22 automated tests pass (`npm test`), and the full flow from Flare to claim, resolve and projector has run on a team laptop with simulated students.
 - **Simulated data:** `npm run demo` creates fake students. Any demo that uses it is labeled as simulated.
-- **Prototype:** Mercusoar has not been piloted in a real lab yet. Beam and the Logbook are planned but not built.
+- **Prototype:** Mercusoar has not been tested with real students in a lab yet. Beam and the Logbook are planned but not built.
 
 ## AI assistance
 
@@ -185,7 +258,9 @@ In line with the STACK 2026 rules, we disclose that we used AI tools (Claude by 
 
 **Mercusoar**, BINUS University, Computer Science
 
-- Jonathan Jeheskiel
-- Steven Widinata
-- Elxinvy Caitlyn Gunawan
-- Moses Joshua Lesmana
+| Member | Role |
+|---|---|
+| Steven Widinata | Team leader; hub and security |
+| Jonathan Jeheskiel | App and interface |
+| Elxinvy Caitlyn Gunawan | User research and design |
+| Moses Joshua Lesmana | Validation and testing |
