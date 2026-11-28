@@ -7,6 +7,18 @@ type Role = SetupConfig["role"];
 
 type Errors = { pc?: string; hub?: string; passcode?: string };
 
+/**
+ * What the setup screen shows:
+ * - search: looking for the hub on the network
+ * - quick:  one hub found, the student only types their PC number
+ * - pick:   more than one hub answered, the student must choose
+ * - full:   the complete form (assistants, or typing the address by hand)
+ */
+type Mode = "search" | "quick" | "pick" | "full";
+
+/** Wait between two searches while no hub answers. One search takes ~1.5 s. */
+const SEARCH_AGAIN_MS = 1500;
+
 // Accepts "localhost" or an IPv4 address like 192.168.1.10
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 function isValidAddress(text: string) {
@@ -35,12 +47,20 @@ export default function SetupScreen({ onStart, previous }: Props) {
   const [hubAddress, setHubAddress] = useState(previous?.hubAddress ?? "127.0.0.1");
   const [passcode, setPasscode] = useState("");
   const [errors, setErrors] = useState<Errors>({});
+  // undefined until the lab config has loaded.
+  const [mode, setMode] = useState<Mode | undefined>(undefined);
+  // Hubs that answered the last search (pick mode).
+  const [hubs, setHubs] = useState<string[]>([]);
 
   // On startup, ask Rust for the lab config file. If it exists, it decides the role.
   useEffect(() => {
     invoke<LabConfig | null>("load_config")
       .then((config) => {
         setLab(config);
+        // Search for the hub, unless the lab config names it (safer in a real
+        // lab) or the user just pressed Exit (keep their answers instead).
+        const search = !previous && (!config || (config.role === "student" && !config.hub_address));
+        setMode(search ? "search" : "full");
         if (!config) return;
         setRole(config.role);
         if (config.seat) chooseSeat(config.seat);
@@ -49,6 +69,60 @@ export default function SetupScreen({ onStart, previous }: Props) {
       })
       .catch((e) => setLabError(String(e)));
   }, []);
+
+  // While searching, ask the network again and again until a hub answers.
+  useEffect(() => {
+    if (mode !== "search") return;
+    let stopped = false;
+    let timer: number | undefined;
+
+    async function search() {
+      const found = await invoke<string[]>("find_hubs").catch(() => []);
+      if (stopped) return;
+      if (found.length === 0) {
+        timer = window.setTimeout(search, SEARCH_AGAIN_MS);
+      } else if (found.length === 1) {
+        joinHub(found[0]);
+      } else {
+        // Two hubs: one may be a fake run by a classmate. Let a person decide.
+        setHubs(found);
+        setMode("pick");
+      }
+    }
+
+    search();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [mode]);
+
+  /** A hub was found (or picked): join it as a student. */
+  function joinHub(address: string) {
+    setHubAddress(address);
+    setRole("student");
+    // The lab config already knows this PC's number: join with no click.
+    if (lab?.pc) {
+      onStart({ role: "student", pc: lab.pc, hubAddress: address });
+      return;
+    }
+    // Start empty: a pre-filled number would let students join as the wrong PC.
+    setPc("");
+    setMode("quick");
+  }
+
+  function pcError(text: string) {
+    const n = Number(text);
+    const ok = Number.isInteger(n) && n >= FIRST_STUDENT_PC && n <= LAST_STUDENT_PC;
+    return ok ? undefined : `Enter a student PC number from ${FIRST_STUDENT_PC} to ${LAST_STUDENT_PC}.`;
+  }
+
+  function handleJoin(e: React.FormEvent) {
+    e.preventDefault();
+    const problem = pcError(pc);
+    setErrors({ pc: problem });
+    if (!problem) onStart({ role: "student", pc: Number(pc), hubAddress });
+  }
 
   // The front assistant hosts the hub, the back one connects to it.
   function chooseSeat(next: Seat) {
@@ -68,10 +142,7 @@ export default function SetupScreen({ onStart, previous }: Props) {
     const address = hubAddress.trim();
     const pcNumber = Number(pc);
 
-    if (role === "student") {
-      const ok = Number.isInteger(pcNumber) && pcNumber >= FIRST_STUDENT_PC && pcNumber <= LAST_STUDENT_PC;
-      if (!ok) found.pc = `Enter a student PC number from ${FIRST_STUDENT_PC} to ${LAST_STUDENT_PC}.`;
-    }
+    if (role === "student") found.pc = pcError(pc);
     if (needsAddress && !isValidAddress(address)) {
       found.hub = "Enter an address like 192.168.1.10 (shown on the front assistant's screen).";
     }
@@ -80,7 +151,7 @@ export default function SetupScreen({ onStart, previous }: Props) {
     }
 
     setErrors(found);
-    if (Object.keys(found).length > 0) return;
+    if (Object.values(found).some(Boolean)) return;
 
     onStart(
       role === "student"
@@ -109,18 +180,116 @@ export default function SetupScreen({ onStart, previous }: Props) {
     );
   }
 
-  if (lab === undefined) return null; // loading, takes a moment
+  if (lab === undefined || mode === undefined) return null; // loading, takes a moment
+
+  const brand = (
+    <div className="brand-row">
+      <Logo size={40} />
+      <div>
+        <h1 className="brand-name">Mercusoar</h1>
+        <p className="tagline">Light the way, not the spotlight.</p>
+      </div>
+    </div>
+  );
+
+  // Leave the automatic flow for the complete form.
+  const manualLabel = locked ? "Type the hub address instead" : "Lab assistant, or type the address by hand";
+  const manualButton = (
+    <button type="button" className="btn-link" onClick={() => setMode("full")}>
+      {manualLabel}
+    </button>
+  );
+
+  if (mode === "search") {
+    return (
+      <main className="setup">
+        <div className="card setup-card">
+          {brand}
+          <div className="search-state" role="status">
+            <span className="search-dot" aria-hidden="true" />
+            <div>
+              <p className="search-title">Looking for the lab hub…</p>
+              <p className="help">
+                This joins automatically once the front assistant has started Mercusoar.
+              </p>
+            </div>
+          </div>
+          {manualButton}
+        </div>
+      </main>
+    );
+  }
+
+  if (mode === "pick") {
+    return (
+      <main className="setup">
+        <div className="card setup-card">
+          {brand}
+          <div className="hub-warning" role="alert">
+            <p className="search-title">More than one hub answered</p>
+            <p className="help">
+              Only one is the real lab hub. Ask the lab assistant which address is shown on their screen.
+            </p>
+          </div>
+          <div className="hub-list">
+            {hubs.map((address) => (
+              <button key={address} type="button" className="hub-choice" onClick={() => joinHub(address)}>
+                {address}
+              </button>
+            ))}
+          </div>
+          <button type="button" className="btn-link" onClick={() => setMode("search")}>
+            Search again
+          </button>
+          {manualButton}
+        </div>
+      </main>
+    );
+  }
+
+  if (mode === "quick") {
+    return (
+      <main className="setup">
+        <form className="card setup-card" onSubmit={handleJoin} noValidate>
+          {brand}
+          <p className="hub-found">
+            <span aria-hidden="true">✓</span> Hub found <span className="muted">({hubAddress})</span>
+          </p>
+          <div className="field">
+            <label htmlFor="quick-pc">Your PC number</label>
+            <input
+              id="quick-pc"
+              type="number"
+              inputMode="numeric"
+              min={FIRST_STUDENT_PC}
+              max={LAST_STUDENT_PC}
+              value={pc}
+              onChange={(e) => setPc(e.target.value)}
+              aria-invalid={!!errors.pc}
+              aria-describedby="quick-pc-help"
+              autoFocus
+            />
+            {errors.pc ? (
+              <p id="quick-pc-help" className="error">{errors.pc}</p>
+            ) : (
+              <p id="quick-pc-help" className="help">
+                The number on the sticker of this PC ({FIRST_STUDENT_PC} to {LAST_STUDENT_PC}).
+              </p>
+            )}
+          </div>
+          <button type="submit" className="btn-primary">Join</button>
+          <button type="button" className="btn-link" onClick={() => setMode("full")}>
+            {locked ? "Type the hub address instead" : "Not a student? Set up manually"}
+          </button>
+        </form>
+      </main>
+    );
+  }
 
   return (
     <main className="setup">
       <form className="card setup-card" onSubmit={handleStart} noValidate>
-        <div className="brand-row">
-          <Logo size={40} />
-          <div>
-            <h1 className="brand-name">Mercusoar</h1>
-            <p className="tagline">Light the way, not the spotlight.</p>
-          </div>
-        </div>
+        {brand}
 
         {!locked && (
           <p className="dev-note">
@@ -158,7 +327,7 @@ export default function SetupScreen({ onStart, previous }: Props) {
           </fieldset>
         )}
 
-        {role === "student" && pcFromConfig && <p className="fixed-seat">Student · PC {pc}</p>}
+        {role === "student" && pcFromConfig && <p className="fixed-seat">Student Â· PC {pc}</p>}
 
         {role === "student" && !pcFromConfig && (
           <div className="field">
@@ -186,8 +355,8 @@ export default function SetupScreen({ onStart, previous }: Props) {
 
         {role === "assistant" && locked && (
           <p className="fixed-seat">
-            Lab assistant · {seat} seat (PC {seat === "Front" ? 1 : 40})
-            {hostHub && " · hosts the hub"}
+            Lab assistant Â· {seat} seat (PC {seat === "Front" ? 1 : 40})
+            {hostHub && " Â· hosts the hub"}
           </p>
         )}
 
