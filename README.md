@@ -89,9 +89,10 @@ A help button on its own is not new. Classroom suites such as Veyon, NetSupport 
 | Status | Feature |
 |---|---|
 | ✅ Built | Real-time hub, Flare, queue, Lab Chart, claim / release / resolve, projector view, passcode lock, lab config |
+| ✅ Built | **Finding the hub automatically**: students no longer type the hub's IP address |
 | 🔜 Next | **Beam**: after a Flare, the assistant can ask to view that student's screen and send a private hint. Nothing opens until the student approves, a bar stays on screen with a Stop button, and remote control needs a second approval. |
 | 🔜 Next | **Logbook**: a history of help requests, stored in SQLite, with a session summary by task so assistants see which tasks students struggle with |
-| 🔜 Next | Room layouts for every lab, reconnecting automatically after a restart, and finding the hub automatically |
+| 🔜 Next | Room layouts for every lab, and reconnecting automatically after a restart |
 | 🔜 Next | A Windows installer, and a pilot in a real BINUS lab |
 
 **Plan to Final Day (16 December 2026):** a mini-lab trial with 6 to 10 volunteer classmates from 12 to 15 December. Each does one task set twice, once raising hands and once with Mercusoar, in swapped order. We will measure how many stuck students ask, waiting time and repeated explanations. On Final Day we will build remote control behind a second approval (FD1), the session summary from the Logbook (FD2), and fixes for the most serious problems found in the trial (FD3).
@@ -135,6 +136,8 @@ The app keeps the night-sea look of the lighthouse logo. **Amber** is kept for F
 - The **hub** is a small WebSocket server written in Rust. It runs inside the Front assistant's app, so nothing else needs to be installed.
 - The hub sends each student **only their own Flare**. Only assistants receive the queue and the PC numbers.
 - The hub only uses the lab's local network. Nothing goes to the internet.
+- **Finding the hub:** when a student opens Mercusoar, it asks the local network "is there a Mercusoar hub?" (a small UDP broadcast on port **47801**). The hub answers, and the student joins it. Only the hub PC listens for this question, so student PCs need no firewall change.
+- If **more than one** hub answers, Mercusoar does not join automatically. It lists the addresses and asks the student to check with the assistant, because a classmate could run a fake hub. On real lab PCs, set `hub_address` in the lab config: then Mercusoar never searches.
 
 **Tech stack:** [Tauri 2](https://tauri.app) (Rust) · React 19 + TypeScript · Vite · tokio + tokio-tungstenite (WebSocket)
 
@@ -181,9 +184,9 @@ Run these from the `app` folder.
 
 ### On one laptop (to try it out)
 
-1. Run **`npm start`**. In the window, choose **Lab assistant**, then **Front (PC 1)**, keep **"Host the hub on this PC"** ticked, and click **Start**.
+1. Run **`npm start`**. The window shows "Looking for the lab hub…". Click **Lab assistant, or type the address by hand**, choose **Lab assistant**, then **Front (PC 1)**, keep **"Host the hub on this PC"** ticked, and click **Start**.
    If Windows Firewall asks, click **Allow** (Private networks).
-2. In a second terminal, run **`npm run window`**. Choose **Student**, enter a PC number (for example **7**), leave the hub address as `127.0.0.1`, and click **Start**.
+2. In a second terminal, run **`npm run window`**. It finds the hub by itself and shows **Hub found**. Enter a PC number (for example **7**) and click **Join**.
 3. In the student window, type a question and click **Send a Flare**. PC 7 lights up on the assistant's Lab Chart.
 4. In the assistant window, click **I'll take it**, then **Resolved**. The student sees each step.
 5. Optional: run **`npm run demo`** in a third terminal to fill the lab with simulated Flares.
@@ -191,10 +194,11 @@ Run these from the `app` folder.
 ### On two laptops (same Wi-Fi or phone hotspot)
 
 1. Connect both laptops to the **same network**. A phone hotspot works well. Campus Wi-Fi often blocks laptops from talking to each other.
-2. On **laptop 1**, set the network to **Private** (Settings → Network & internet → Wi-Fi → your network → Network profile type → Private). Then start Mercusoar as the **Front** assistant hosting the hub. Note the **Hub address** shown at the top, for example `192.168.43.120`.
-3. On **laptop 2**, start Mercusoar (`npm start`, or the `.exe` from `npm run build:exe`) and choose:
-   - **Student**: enter laptop 1's hub address.
-   - **or Lab assistant → Back**: enter the hub address and the **passcode**. On laptop 1, click **Show** next to the passcode to see it.
+2. On **laptop 1**, set the network to **Private** (Settings → Network & internet → Wi-Fi → your network → Network profile type → Private). Then start Mercusoar as the **Front** assistant hosting the hub, and click **Allow** if Windows Firewall asks.
+3. On **laptop 2**, start Mercusoar (`npm start`, or the `.exe` from `npm run build:exe`):
+   - **Student**: Mercusoar finds laptop 1's hub by itself. Enter the PC number and click **Join**. No IP address to type.
+   - **or Lab assistant → Back**: click **Lab assistant, or type the address by hand**. The hub address is filled in if it was found; enter the **passcode** (on laptop 1, click **Show** next to it).
+   - Stuck on "Looking for the lab hub…"? Some hotspots block broadcasts. Click the same link and type the **Hub address** shown at the top of laptop 1's window, for example `192.168.43.120`.
 4. Want a busier lab? Run `npm run demo` on **laptop 1**. The hub only lets each computer be **one** student PC, so that classmates can't pose as each other. The hub's own laptop is the exception.
 5. Can't connect? On laptop 2, run `Test-NetConnection <hub address> -Port 47800`. If the result is `False`, laptop 1's firewall or the hotspot is blocking the connection.
 
@@ -213,6 +217,8 @@ Without a config file, Mercusoar runs in **developer mode** and shows the role p
 { "role": "assistant", "seat": "Back", "hub_address": "192.168.1.10" }
 ```
 
+`hub_address` can be left out on student PCs: Mercusoar then finds the hub by itself. Keeping it is safer, because then no other PC can pretend to be the hub.
+
 If the file exists but is invalid, Mercusoar shows an error and does **not** fall back to the role picker, so students can't use a broken file to reach the assistant role.
 
 ### Troubleshooting
@@ -220,6 +226,8 @@ If the file exists but is invalid, Mercusoar shows an error and does **not** fal
 | Problem | Fix |
 |---|---|
 | `could not open port 47800` | Another window is already hosting the hub. Close all Mercusoar windows and start again. |
+| Student stays on "Looking for the lab hub…" | The Front assistant hasn't clicked Start yet, laptop 1's firewall blocks UDP port 47801, or the network blocks broadcasts. Type the address by hand instead. |
+| "More than one hub answered" | Two PCs on this network host a hub. Pick the address shown on the real assistant's screen, or close the other hub. |
 | Student shows "Hub unreachable, retrying…" | The Front assistant hasn't clicked Start yet, the hub address is wrong, or the firewall is blocking the connection. |
 | "Wrong passcode" | Click **Show** on the Front assistant's screen and type the passcode again. After 5 wrong tries that PC is locked out for 10 minutes. |
 | `npm run window`: "localhost refused to connect" | `npm start` isn't running. Start it first. |
@@ -238,6 +246,7 @@ app/
 ├── src-tauri/               Rust backend
 │   └── src/
 │       ├── hub.rs           The hub: queue, roles, passcode, limits (with tests)
+│       ├── discovery.rs     Finding the hub on the network (with tests)
 │       └── lib.rs           Tauri commands and the lab config loader
 └── scripts/demo-students.mjs   Simulated students for demos (test data only)
 ```
@@ -246,7 +255,7 @@ app/
 
 - **Anonymous to classmates:** no student ever receives another student's PC number or question.
 - **Minimal data:** a Flare holds only a PC number, an optional question, when it was sent and who claimed it. There are no names, accounts or student IDs, and the queue ends with the session.
-- **Tested:** all 22 automated tests pass (`npm test`), and the full flow from Flare to claim, resolve and projector has run on a team laptop with simulated students.
+- **Tested:** all 31 automated tests pass (`npm test`), and the full flow from Flare to claim, resolve and projector has run on a team laptop with simulated students. Finding the hub automatically has been tested on one laptop; a test across two laptops on a phone hotspot is next.
 - **Simulated data:** `npm run demo` creates fake students. Any demo that uses it is labeled as simulated.
 - **Prototype:** Mercusoar has not been tested with real students in a lab yet. Beam and the Logbook are planned but not built.
 
